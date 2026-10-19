@@ -1,0 +1,234 @@
+source("GaussianProcesses.R")
+
+posteriorGP <- function (X, y, XStar, sigmaNoise, k) {
+  K <- k(X, X)
+  L <- t(chol(K + sigmaNoise**2 * diag(nrow(K))))
+  alpha <- solve(t(L), solve(L,y))
+  k_star <- k(X, XStar)
+  f_star_mean <- t(k_star) %*% alpha
+  
+  v <- solve(L, k_star)
+  f_star_var <- diag(k(XStar, XStar)) - diag(t(v) %*% v)
+  
+  return(list(mean=f_star_mean, var=f_star_var))
+}
+
+plotGP <- function(X, y, XStar, res, main = "", ylim= c(-2.5, 2.5)) {
+  sd <- sqrt(res$var)
+  plot(XStar, res$mean, type = "l", lwd = 2, ylim = ylim,
+       xlab = "x", ylab = "f(x)", main = main)
+  lines(XStar, res$mean + 1.96 * sd, col = "blue", lty = 2)
+  lines(XStar, res$mean - 1.96 * sd, col = "blue", lty = 2)
+  points(X, y, pch = 19, col = "red")
+}
+
+# 2.1.2
+X <- 0.4; y <- 0.719
+XStar <- seq(-1, 1, length.out=100)
+k03 <- function(x1, x2) SquaredExpKernel(x1, x2, sigmaF=1, l=0.3)
+res <- posteriorGP(X, y, XStar, sigmaNoise = 0.1, k = k03)
+
+plotGP(X, y, XStar, res, main="2.1.2 one observation, l = 0.3")
+
+# 2.1.3
+X <- c(0.4, -0.6); y <- c(0.719, -0.044)
+res <- posteriorGP(X, y, XStar, sigmaNoise = 0.1, k = k03)
+plotGP(X, y, XStar, res, main = "2.1.3: two observations, l = 0.3")
+
+#2.1.4
+X <- c(-1.0, -0.6, -0.2, 0.4, 0.8)
+y <- c(0.768, -0.044, -0.940, 0.719, -0.664)
+res <- posteriorGP(X, y, XStar, sigmaNoise = 0.1, k = k03)
+plotGP(X, y, XStar, res, main = "Part 2.1.4: five observations, l = 0.3")
+
+#2.1.5
+k1 <- function(x1, x2) SquaredExpKernel(x1, x2, sigmaF = 1, l = 1)
+res <- posteriorGP(X, y, XStar, sigmaNoise = 0.1, k = k1)
+plotGP(X, y, XStar, res, main = "2.1.5: five observations, l = 1")
+
+
+
+# 2.2
+
+library(kernlab)
+data <- read.csv("https://github.com/STIMALiU/AdvMLCourse/raw/master/GaussianProcess/Code/TempTullinge.csv", header = TRUE, sep = ";")
+time <- 1:2190
+day <- rep(1:365, 6)
+idx <- seq(1, 2190, by = 5)
+time <- time[idx]; day <- day[idx]; temp <- data$temp[idx]
+
+#2.2.1
+
+SEkernelKL <- function(sigmaf = 1, ell = 1) 
+{
+  rval <- function(x,y = NULL){
+    r = sqrt(sum((x-y)**2))
+    return(sigmaf^2*exp(-(r**2/(2*ell**2))))
+  }
+  class(rval) <- "kernel"
+  return(rval)
+} 
+
+kern <- SEkernelKL(sigmaf=1, ell=1)
+kern(1,2)
+
+X <- c(1,3,4)
+XStar <- c(2,3,4)
+
+kernelMatrix(kern, X, XStar)
+
+X <- c(1,3,4)
+XStar <- c(2,3,4)
+
+#2.2.2
+
+fit <- lm(temp ~ time + I(time**2))
+sigmaNoise <- var(fit$residuals)
+
+kern_20_100 <- SEkernelKL(sigmaf = 20, ell=100)
+
+GPfit <- gausspr(time, temp, kernel=kern_20_100, var= sigmaNoise, variance.model=TRUE, scaled=FALSE)
+
+meanPred <- predict(GPfit, time)
+sdPred <- predict(GPfit, time, type="sdeviation")
+
+plot(time, temp, pch = 20, cex = 0.5, col = "grey")
+lines(time, meanPred, col = "red", lwd = 2)
+lines(time, meanPred + 1.96 * sdPred, col = "blue", lty = 2)
+lines(time, meanPred - 1.96 * sdPred, col = "blue", lty = 2)
+
+# 2.2.3
+k_20_100 <- function(x1, x2) SquaredExpKernel(x1, x2, sigmaF = 20, l = 100)
+res <- posteriorGP(time, temp, time, sigmaNoise = sqrt(sigmaNoise), k = k_20_100)
+plotGP(time, temp, time, res, main="'Rasmussen
+and Willams'-implementation", ylim = range(temp))
+
+# Comparison with 2.2 (2): the posterior mean and 95% bands from our own
+# Algorithm 2.1 implementation match those from kernlab's gausspr, which
+# confirms posteriorGP is correct. Note that many observations fall outside
+# the bands: the bands are for f (the smooth underlying temperature), not
+# for individual noisy measurements y, which scatter around f with
+# sd ~ 8 degrees. A band for y would be mean +- 1.96 * sqrt(var + sigmaNoise^2).
+
+# 2.2.4
+kern_20_100 <- SEkernelKL(sigmaf = 20, ell=100)
+
+GPfit <- gausspr(day, temp, kernel=kern_20_100, var= sigmaNoise, variance.model=TRUE, scaled=FALSE)
+
+meanPred_day <- predict(GPfit, day)
+sdPred_day <- predict(GPfit, day, type="sdeviation")
+
+plot(time, temp, pch = 20, cex = 0.5, col = "grey")
+lines(time, meanPred, col = "red", lwd = 2)
+lines(time, meanPred_day, col = "blue", lwd = 2)
+legend("bottomright", legend = c("f(time)", "f(day)"), col = c("red", "blue"), lwd = 2)
+
+# 2.2 (4) Comparison: the day model (blue) pools all six years into one
+# seasonal profile, so its curve repeats identically every year (winters
+# about -4, summers about 17). Pro: uses all years to estimate each day of
+# the year, giving a stable seasonal pattern that extrapolates to future
+# years. Con: cannot capture year-to-year differences (e.g. the cold winters
+# at the start and in 2010/11, the mild winter around time 1500), and treats
+# Dec 31 and Jan 1 as far apart (distance 364) even though they are adjacent.
+# The time model (red) follows each year's actual pattern, but has no notion
+# of periodicity: each year is learned only from nearby data, and it would
+# revert to the prior mean 0 if extrapolated beyond the data.
+
+#2.2.5
+
+SELPkernelKL <- function(sigmaf = 1, ell1 = 1, ell2=1, d=365) 
+{
+  #locally peroidic squared exponenctial kernel
+  rval <- function(x,y = NULL){
+    r = abs(x-y)
+    return(sigmaf^2*exp(-2*(sin(pi*r/d)**2/ell1**2))*exp(-0.5*r**2/ell2**2))
+  }
+  class(rval) <- "kernel"
+  return(rval)
+} 
+
+kern_lp <- SELPkernelKL(sigmaf=20, ell1=1, ell2=100, d=365)
+  
+GPfit <- gausspr(time, temp, kernel=kern_lp, var= sigmaNoise, variance.model=TRUE, scaled=FALSE)
+meanPred_lp <- predict(GPfit, time)
+sdPred_lp <- predict(GPfit, time, type="sdeviation")
+
+plot(time, temp, pch = 20, cex = 0.5, col = "grey")
+lines(time, meanPred, col = "red", lwd = 2)
+lines(time, meanPred_day, col = "blue", lwd = 2)
+lines(time, meanPred_lp, col = "darkgreen", lwd = 2)
+legend("bottomright", legend = c("SE, time", "SE, day", "Locally periodic, time"),
+       col = c("red", "blue", "darkgreen"), lwd = 2)
+
+
+# Why the locally periodic curve has bumps mainly in winters: the kernel is
+# stationary, so the prior is equally flexible everywhere. But the posterior
+# mean only uses that flexibility where the data pull it. Summer temperatures
+# are tightly clustered, so the curve stays smooth there. Winter temperatures
+# are much more variable (cold snaps and outliers down to -15 to -20 around
+# time 350-420 and 750-770), and the shorter effective length scale (~50 days)
+# lets the curve bend toward them. The SE models (ell = 100) are too stiff to
+# react, so they pass smoothly through the middle.
+
+
+# 2.3.1
+
+data <- read.csv("https://github.com/STIMALiU/AdvMLCourse/raw/master/GaussianProcess/Code/banknoteFraud.csv", header=FALSE, sep=",")
+names(data) <- c("varWave","skewWave","kurtWave","entropyWave","fraud")
+data[,5] <- as.factor(data[,5])
+
+set.seed(111); 
+SelectTraining <- sample(1:dim(data)[1], size = 1000, replace = FALSE)
+
+train <- data[SelectTraining,]
+test <- data[-SelectTraining,]
+
+GPfitFraud <- gausspr(fraud ~  varWave + skewWave, data=train)
+
+pred_train <- predict(GPfitFraud, train[, c("varWave", "skewWave")])
+cm_train <- table(actual=train$fraud, predicted=pred_train)
+accuracy_train <- sum(diag(cm_train))/sum(cm_train)
+
+cm_train
+accuracy_train
+
+
+x1 <- seq(min(train$varWave), max(train$varWave), length = 100)
+x2 <- seq(min(train$skewWave), max(train$skewWave), length = 100)
+gridPoints <- expand.grid(varWave = x1, skewWave = x2)
+probPreds <- predict(GPfitFraud, gridPoints, type = "probabilities")
+contour(x1, x2, matrix(probPreds[, 2], 100, 100), 20,
+        xlab = "varWave", ylab = "skewWave", main = "Prob(fraud = 1)")
+points(train$varWave[train$fraud == 1], train$skewWave[train$fraud == 1], col = "blue")
+points(train$varWave[train$fraud == 0], train$skewWave[train$fraud == 0], col = "red")
+legend("topright", legend = c("fraud = 1", "fraud = 0"),
+       col = c("blue", "red"), pch = 1, bg = "white")
+
+# Training accuracy 0.941.
+# Contours: fraud probability is high (~0.9) around the fraud points
+# (left) and low (~0.05) around the genuine points (right). The decision
+# boundary is near varWave = 0, where the classes overlap, which explains the
+# misclassifications. Far from the data the probabilities drift back toward
+# 0.5, as the GP reverts to its prior where there is no information.
+
+# 2.3.2
+
+pred_test <- predict(GPfitFraud, test[, c("varWave", "skewWave")])
+cm_test <- table(actual=test$fraud, predicted=pred_test)
+accuracy_test <- sum(diag(cm_test)/sum(cm_test))
+cm_test
+accuracy_test
+
+# Test accuracy 0.925, slightly lower than training accuracy. as expected
+
+
+# 2.3.3
+
+GPfitFraud_4 <- gausspr(fraud ~  ., data=train)
+
+pred_test <- predict(GPfitFraud_4, test[, c("varWave","skewWave","kurtWave","entropyWave")])
+cm_test_4 <- table(actual=test$fraud, predicted=pred_test)
+accuracy_test_4 <- sum(diag(cm_test_4))/sum(cm_test_4)
+
+cm_test_4
+accuracy_test_4
