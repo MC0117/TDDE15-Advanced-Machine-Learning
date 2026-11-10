@@ -13,16 +13,28 @@ library(entropy)
 
 ## Question 1: Build the HMM
 
+*Implementation:* Built 10x10 transition and emission matrices: each sector stays or moves one step forward (wrapping 10 to 1) with probability 0.5, and the sensor reports one of sectors $i-2,\dots,i+2$ (modulo 10) with probability 0.2 each.
+
 ```{r}
+# --- Build HMM matrices: robot on a ring of 10 sectors ---
+# Hidden states = true sector, symbols = sensor reading (both 1..10)
 states <- 1:10
 symbols <- 1:10
 
+# transProbs[from, to]: rows = current state z_t, cols = next state z_t+1
+#   (each row sums to 1)
+# emissionProbs[state, symbol]: rows = hidden state, cols = observed symbol
+#   (each row sums to 1)
 transProbs <- matrix(0,10,10)
 emissionProbs <- matrix(0,10,10)
 
 for(i in 1:10) {
+  # Stay in sector i or move to i+1, each w.p. 0.5.
+  # (i %% 10) + 1 wraps 10 -> 1 (ring)
   transProbs[i,i] <- 0.5
   transProbs[i, (i%%10) + 1] <- 0.5
+  # Sensor reports one of i-2..i+2 uniformly (5 values -> 0.2 each).
+  # ((x - 1) %% 10) + 1 maps any integer onto 1..10, e.g. 0 -> 10, -1 -> 9
   for(k in -2:2){
     emissionProbs[i, ((i+k-1) %% 10) + 1] <- 0.2
   }
@@ -31,36 +43,54 @@ for(i in 1:10) {
 
 ## Question 2: Simulate 100 time steps
 
+*Implementation:* Created the model with initHMM() using a uniform start distribution (0.1 per sector), then drew 100 hidden states and observations with simHMM() (no seed set).
+
 ```{r}
+# --- Create HMM object and simulate ---
+# initHMM(States, Symbols, startProbs, transProbs, emissionProbs);
+# startProbs = uniform over the 10 sectors
 hmm <- initHMM(States = states, Symbols = symbols, transProbs = transProbs,
                 emissionProbs = emissionProbs, startProbs = rep(0.1, 10))
+# simHMM returns a list: $states (true hidden path), $observation (readings)
 simulation <- simHMM(hmm, 100)
 ```
 
 ## Question 3: Filtered, smoothed, and most probable path
 
+*Implementation:* Ran forward() and backward() from the HMM package; per time step, exponentiated the log-probabilities (after subtracting the column max) and normalised. Filtered uses alpha, smoothed uses alpha times beta, and the most probable path comes from viterbi().
+
 ```{r}
+# --- Filtering, smoothing (forward-backward) and Viterbi ---
 observations <- simulation$observation
 
 filtered <- rep(0, 100)
 smoothed <- rep(0, 100)
 
+# forward/backward return LOG probabilities, matrix dims = states x time
+#   logAlpha[i, t] = log p(x_0:t, z_t = i)
+#   logBeta[i, t]  = log p(x_t+1:T | z_t = i)
 logAlpha <- forward(hmm, observations)
 logBeta <- backward(hmm, observations)
 
-# filtered
+# filtered: p(z_t | x_0:t) propto alpha_t. Per column (time step):
+# subtract max before exp to avoid underflow, then normalize to sum 1.
+# (Log scale because alpha is a product of many probabilities < 1 and
+# underflows to 0 for long sequences. exp(col - max) = alpha / max(alpha):
+# the largest entry becomes 1 and the constant cancels when normalizing.)
+# Result: 10 x 100 matrix, column t = distribution over states at t
 filtered <- apply(logAlpha, 2, function(col){
   col <- exp(col - max(col))
   col/sum(col)
 })
 
-#smoothed
+# smoothed: p(z_t | x_0:T) propto alpha_t * beta_t (sum in log space)
 smoothed <- apply(logAlpha + logBeta, 2, function(col){
   col <- exp(col - max(col))
   col/sum(col)
 })
 
-#probable path
+# probable path: Viterbi = most probable JOINT state sequence
+# argmax_{z_0:T} p(z_0:T | x_0:T); returns vector of states (length T)
 probablePath <- viterbi(hmm, observations)
 
 #prints
@@ -69,9 +99,20 @@ print(smoothed)
 print(probablePath)
 ```
 
+**Theory:** Three different inference targets, all using only the observations $x_{0:T}$:
+
+- *Filtering* $p(z_t \mid x_{0:t})$: belief about the current state given readings so far (online). Forward recursion: $\alpha_t(z_t) = p(x_t \mid z_t) \sum_{z_{t-1}} p(z_t \mid z_{t-1})\, \alpha_{t-1}(z_{t-1})$, and $p(z_t \mid x_{0:t}) \propto \alpha_t(z_t)$.
+- *Smoothing* $p(z_t \mid x_{0:T})$: belief about $z_t$ given past *and* future readings (offline). Backward recursion: $\beta_t(z_t) = \sum_{z_{t+1}} p(x_{t+1} \mid z_{t+1})\, p(z_{t+1} \mid z_t)\, \beta_{t+1}(z_{t+1})$ with $\beta_T = 1$, and $p(z_t \mid x_{0:T}) \propto \alpha_t(z_t)\, \beta_t(z_t)$. At $t = T$ smoothing equals filtering.
+- *Most probable path* $\arg\max_{z_{0:T}} p(z_{0:T} \mid x_{0:T})$ (Viterbi): same recursion as forward but with max instead of sum, plus backtracking.
+- *In practice:* each recursion is evaluated for every value of $z_t$, so there is an implicit loop over all 10 states inside the loop over time, and the sum (or max) runs over the 10 previous states. The results are $10 \times 100$ matrices (states $\times$ time): $\alpha[i,t] = p(x_{0:t}, z_t = i)$ and $\beta[i,t] = p(x_{t+1:T} \mid z_t = i)$. In Viterbi, $\omega[i,t] = \max_{z_{0:t-1}} \log p(z_{0:t-1}, z_t = i, x_{0:t})$ is the log-probability of the best path ending in state $i$ at time $t$, and $\psi[i,t]$ is the previous state on that path (a back-pointer). The path is read off backwards, starting from $\arg\max_i \omega[i,T]$.
+
 ## Question 4: Accuracy
 
+*Implementation:* Took the argmax state per time step for the filtered and smoothed distributions and compared with the true simulated states; accuracy is the fraction of the 100 steps that match. The Viterbi path is compared directly.
+
 ```{r}
+# --- Accuracy = fraction of time steps where estimate == true state ---
+# Point estimate per step: argmax over states of each column
 # accuracy filtered
 filteredStates <- apply(filtered, 2, which.max)
 filteredAcc <- mean(filteredStates == simulation$states)
@@ -82,37 +123,42 @@ smoothedStates <- apply(smoothed, 2, which.max)
 smoothedAcc <- mean(smoothedStates == simulation$states)
 print(smoothedAcc)
 
-#accuracy probable path
+#accuracy probable path (Viterbi already gives a state sequence)
 probablePathAcc <- mean(probablePath == simulation$states)
 print(probablePathAcc)
 ```
 
 ## Question 5: Repeat with a different sample
 
+*Implementation:* Repeated Questions 3 and 4 on a new 100-step simulation (set.seed(222222)) from the same HMM and compared the three accuracies.
+
 ```{r}
+# --- Same as Q3 + Q4 on a new simulated sample (new seed) ---
 set.seed(222222)
+# simHMM: list with $states (true path) and $observation (readings)
 simulation <- simHMM(hmm, 100)
 observations <- simulation$observation
 
 filtered <- rep(0, 100)
 smoothed <- rep(0, 100)
 
+# Log alpha/beta, dims states x time
 logAlpha <- forward(hmm, observations)
 logBeta <- backward(hmm, observations)
 
-# filtered
+# filtered: p(z_t | x_0:t) propto alpha_t (stable exp + normalize per column)
 filtered <- apply(logAlpha, 2, function(col){
   col <- exp(col - max(col))
   col/sum(col)
 })
 
-#smoothed
+#smoothed: p(z_t | x_0:T) propto alpha_t * beta_t
 smoothed <- apply(logAlpha + logBeta, 2, function(col){
   col <- exp(col - max(col))
   col/sum(col)
 })
 
-#probable path
+#probable path (Viterbi, most probable joint sequence)
 probablePath <- viterbi(hmm, observations)
 
 #prints
@@ -120,13 +166,13 @@ print(filtered)
 print(smoothed)
 print(probablePath)
 
-# accuracy filtered
+# accuracy filtered (argmax per column vs true states)
 filteredStates <- apply(filtered, 2, which.max)
 filteredAcc <- mean(filteredStates == simulation$states)
 print(filteredAcc)
 
 #accuracy smoothed
-smoothedStates <- apply(smoothed, 2, which.max)
+smoothedStates <- apply(smoothed, 2, which.max)  # argmax state per column
 smoothedAcc <- mean(smoothedStates == simulation$states)
 print(smoothedAcc)
 
@@ -136,15 +182,22 @@ print(probablePathAcc)
 ```
 
 **ANSWER:** The smoothing is in general better than filtered since smoothing has
-access to the entire state sequence as opposed to filtered. Most probable path
+access to the entire observation sequence as opposed to filtered. Most probable path
 will in general be outperformed by smoothing because smoothing is maximizing
 P(zt | x0:T) separately for every t. Viterbi does it as a whole, Viterbi needs
 to respect the internal consistency of the transition model and cannot jump
 around implausibly among the states.
 
+More precisely: (i) smoothing conditions on a superset of the data used by filtering, and conditioning on more data cannot increase the expected uncertainty about $z_t$; (ii) Taking the argmax of each smoothed marginal maximises the *expected number of correctly guessed states*, which is exactly what accuracy measures. Viterbi maximises the probability of the *whole* path being correct, a different objective, so it is not optimal per step. The price of smoothing is that its per-step argmaxes need not form a feasible path, e.g. it may guess sector 3 then sector 6, which the transition model forbids; Viterbi's path always has non-zero probability. Neither ordering is guaranteed on every single sample, only in expectation, which is why several samples should be compared.
+
 ## Question 6: Entropy of the filtered distributions
 
+*Implementation:* Computed entropy.empirical() (natural log) of the filtered distribution at each of the 100 time steps of the Question 5 sample and plotted it over time.
+
 ```{r}
+# --- Entropy of filtered distribution at each time step ---
+# entropy.empirical normalizes the column and computes -sum(p log p)
+# (natural log). 0 = certain of state; log(10) = uniform/max uncertainty
 filtered_entropy <- apply(filtered, 2, entropy.empirical)
 
 plot(filtered_entropy, type = "l",
@@ -152,22 +205,25 @@ plot(filtered_entropy, type = "l",
      main = "Entropy of filtered distribution over time")
 ```
 
-**ANSWER:** No. If it were always true, entropy would decrease monotonically
-over time. Instead the plot fluctuates up and down: some new observations
-are informative and sharpen the filtered distribution (entropy drops), while
-others are ambiguous (e.g. they fall in the overlapping part of the device's
-reporting window) and increase uncertainty about the robot's current sector,
-even at late time steps. Since filtering is first-order Markov, only recent
-evidence matters for p(z_t | x_0:t), old accumulated certainty isn't
-"banked", so uncertainty can rise again regardless of how large t is.
+**ANSWER:** No. Each time step, the filtered distribution goes through two steps. The predict step pushes it through the transition model: the robot may stay or move, so the belief spreads out and the uncertainty grows. The update step weights it by the new reading, which shrinks the uncertainty, but by how much depends on the reading: some are more informative than others. When a step’s prediction spreads the belief more than the new reading sharpens it, the entropy goes up. So uncertainty can increase at any time, even late in the sequence. Filtering still uses all past readings; the transition model just keeps adding new uncertainty about where the robot has gone.
+
+Note that "more data cannot increase expected uncertainty" holds for a *fixed* variable, e.g. $z_{50}$ given $x_{0:50}$ vs. $x_{0:100}$. Here the target $z_t$ changes with $t$, so the filtered entropy fluctuates around a stationary level instead of decreasing towards 0; the plot shows this.
 
 ## Question 7: Probabilities for time step 101
 
+*Implementation:* Multiplied the filtered distribution at step 100 (Question 5 sample) by the transition matrix, giving $p(z_{101} \mid x_{0:100})$ as a vector over the 10 sectors.
+
 ```{r}
+# --- One-step prediction: p(z_101 | x_0:100) ---
+# = sum_i p(z_100 = i | x_0:100) * p(z_101 | z_100 = i)
+# i.e. row vector (filtered) %*% transProbs (rows = from-state)
 filtered_t100 <- filtered[, 100]         # p(z_100 | x_0:100), length-10 vector
 
+# %*% gives a 1x10 matrix; as.numeric drops dims -> plain length-10 vector
 probs_101 <- as.numeric(filtered_t100 %*% transProbs)
 names(probs_101) <- states
 
 print(probs_101)
 ```
+
+**Theory:** This is one prediction step, i.e. filtering without the update (there is no $x_{101}$): $p(z_{101} \mid x_{0:100}) = \sum_{z_{100}} p(z_{101} \mid z_{100})\, p(z_{100} \mid x_{0:100})$. Each sector's mass is split half-half between staying and moving forward, so the prediction is never sharper than the filtered distribution. Predicting $k$ steps ahead repeats the multiplication by the transition matrix and converges to the stationary (here uniform) distribution.

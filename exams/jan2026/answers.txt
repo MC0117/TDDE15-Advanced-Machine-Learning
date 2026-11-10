@@ -1,0 +1,6 @@
+Why does DQL reduce the overestimation bias
+
+Looking at the results. the combined Q table in DQL is about 2x higher than the one in QL, this is reasonable as q1 and q2 should both converge to q as number of episodes increase, therefore its expected that the sum of q1 and q2 should be about 2x q-values in QL. Overall we can see that for some states: especially the ones in column 1-2 is quite different in DQL. this is likely because the higher variance in the DQL can weight some neutral states or marginally better states (like (3,2) and (4,2) more fairly) its here less "convinced" that the expected reward is higher for going up or down. Its far from perfect however, consider going under the terminal states, which it does not really prefer.
+
+
+Normal QL will for each episode update the qtable for every stepperformed during that episode. this means that for each update the correction term is based on the maximum expected reward that the next state has ever encountered given any actions that have previously been performed from this state. DQL actually has the same problem but introduces some variance through having two "independent" Q-tables (independent in the sense that a value in Q1 will only be updated using other Q1 values and vice versa). The policy function in DQL will therefore have a higher variance in reward estimations thus lower bias
